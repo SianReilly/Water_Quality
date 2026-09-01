@@ -14,6 +14,9 @@ git clone <this-repo>
 cd london-water-quality
 pip install -r requirements.txt
 
+# 0. Sanity-check the API against a handful of records first (fast, no cache written)
+python fetch_data.py --probe
+
 # 1. Build the local data cache (recommended: run this once from the CLI)
 python fetch_data.py --years 5 --radius-km 30
 
@@ -26,15 +29,26 @@ small live sample (15km radius, 2 years) directly from the API so you can try
 it immediately — but for a proper "worst water quality over time" analysis,
 run the full `fetch_data.py` pull first (see options below).
 
+**Run `--probe` first.** This project targets a genuinely new EA API
+(v1.3.1, OpenAPI 3.1, docs at
+`https://environment.data.gov.uk/water-quality/api-docs`) that replaced an
+older Linked-Data-API service most existing tutorials still reference. Its
+exact request parameters were confirmed by hand against the live Swagger UI,
+but the exact JSON shape of an individual *observation* record was not — see
+"How the API is used" below. `--probe` fetches a handful of sampling points
+and observations and prints the raw response, so you can catch any mismatch
+in seconds rather than after a multi-minute full pull.
+
 ## `fetch_data.py` options
 
 ```bash
-python fetch_data.py --years 8 --radius-km 40   # more history, wider area (largest pull)
-python fetch_data.py --years 2 --radius-km 15   # smaller, faster pull
+python fetch_data.py --probe                    # quick sanity check, no cache written
+python fetch_data.py --years 8 --radius-km 40    # more history, wider area (largest pull)
+python fetch_data.py --years 2 --radius-km 15    # smaller, faster pull
 ```
 
-- `--years` — how many years of history to fetch (measurement requests are chunked one calendar year at a time, and paged with `_offset`, to stay within the API's ~2 minute per-request timeout).
-- `--radius-km` — the EA API only supports radius (`lat`/`long`/`dist`) or EA-area-code filtering for this dataset, **not** a bounding box — an earlier version of this script assumed bounding-box params (`min-easting`/`max-easting`) and got 404s, since that filter doesn't exist on this endpoint. The default of 30km from central London (Trafalgar Square) is chosen because the API docs describe `dist` as filtering "within approximately a square" of that half-width, which comfortably covers the Greater London boundary corner-to-centre. Widen it if you want to include the wider Thames catchment.
+- `--years` — how many years of history to fetch (observation requests are chunked one calendar year at a time, and paged with `skip`/`limit`, to stay under the API's per-request row caps).
+- `--radius-km` — geographic filtering uses the confirmed `latitude`/`longitude`/`radius` (km) query parameters. The default of 30km from central London (Trafalgar Square) comfortably covers the Greater London boundary corner-to-centre (~25-30km at the furthest edges). The API also accepts a GeoJSON Polygon body for a tighter shape (confirmed request format: a bare `{"type": "Polygon", "coordinates": [...], "bbox": [...]}`, not wrapped) — not wired up by default here, but the shape is documented below if you want a precise Greater London boundary instead of a circle.
 
 Data is written to `data/london_sampling_points.parquet` and
 `data/london_measurements.parquet`, which `app.py` reads on startup
@@ -43,51 +57,68 @@ them, since the archive updates regularly).
 
 ## How the API is used
 
-The Water Quality Archive is a Linked-Data-API-style service that returns
-JSON/CSV/RDF, documented at
-https://environment.data.gov.uk/water-quality/view/doc/reference. Two
-endpoints matter here (parameter names taken directly from that reference):
+**This project targets the new Water Quality Archive REST API** (v1.3.1,
+OpenAPI 3.1), with interactive docs at
+`https://environment.data.gov.uk/water-quality/api-docs`. This is a
+different, more recently built service than the older Linked-Data-API
+(`environment.data.gov.uk/water-quality/id/...`, `.../data/measurement.csv`)
+that most existing blog posts and tutorials reference — that older one now
+404s. Because the docs *pages* block automated fetching via `robots.txt`
+(the same as most `environment.data.gov.uk` documentation, though the actual
+`/sampling-point` and `/data/*` data endpoints are the public API and meant
+to be queried programmatically), the parameters below were confirmed by hand
+against the live Swagger UI rather than scraped.
 
-**Sampling points**, filtered by radius around central London:
-
-```
-https://environment.data.gov.uk/water-quality/id/sampling-point.json
-    ?lat=51.5074&long=-0.1278&dist=30
-    &_view=full&_limit=2000&_offset=0
-```
-
-**Measurements**, filtered by the same radius and a date range, one calendar
-year at a time:
+**Sampling points** — `GET /sampling-point`, radius-filtered:
 
 ```
-https://environment.data.gov.uk/water-quality/data/measurement.csv
-    ?lat=51.5074&long=-0.1278&dist=30
-    &startDate=2023-01-01&endDate=2023-12-31
-    &_view=full&_limit=5000&_offset=0
+https://environment.data.gov.uk/water-quality/sampling-point
+    ?latitude=51.5074&longitude=-0.1278&radius=30
+    &skip=0&limit=100
 ```
+Header `Accept-Crs: http://www.opengis.net/def/crs/EPSG/0/4326` requests
+WGS84 lat/long geometry instead of the default British National Grid, so no
+reprojection is needed. Confirmed response shape is a JSON-LD
+`hydra:Collection` with a `member` array; each member has `notation`,
+`prefLabel`, `geometry.asWKT` (a WKT `POINT(lon lat) <crs-uri>` string),
+`samplingPointType`, `samplingPointStatus`, `region`, `area`, `subArea` —
+this was confirmed directly against a live example response.
 
-Important things this API does **not** support, that are easy to assume by
-analogy with other EA/Defra APIs (e.g. the bathing-water API used elsewhere
-in this project's development): there is **no bounding-box filter**
-(`min-easting`/`max-easting`) on the sampling-point or measurement endpoints
-— only `lat`/`long`/`dist`, `easting`/`northing`/`dist`, or `area`/`subArea`
-EA-organisational-unit codes. Using bounding-box params returns a 404.
+**Observations** — `POST /data/observation`, for many sampling points at once:
 
-`fetch_data.py` pages one calendar year at a time via `_offset`/`_limit`, so
-no single request risks the API's ~2 minute server-side timeout (for a much
-bigger pull than this covers, the API also has an async `/batch/measurement`
-endpoint — see the docs). `_view=full` is used so each measurement row
-already carries its sampling point's `lat`/`long` directly, avoiding a
-separate British-National-Grid reprojection step. Column names in the CSV
-export are matched against the documented `_view=full` property paths
-first (e.g. `sample.samplingPoint.label`, `determinand.label`), with a
-keyword-based fallback in `_clean_measurements()` in case a live export
-differs slightly.
+```
+https://environment.data.gov.uk/water-quality/data/observation
+    ?latitude=51.5074&longitude=-0.1278&radius=30
+    &dateFrom=2023-01-01&dateTo=2023-12-31
+    &skip=0&limit=2500
+```
+with headers `Accept: text/csv`, `CSV-Header: present`,
+`Accept-Crs: .../EPSG/0/4326`, `API-Version: 1`. All of the query parameter
+names above (`latitude`/`longitude`/`radius`, `dateFrom`/`dateTo`, `skip`,
+`limit`, plus `determinand`, `samplingPurpose`, `complianceOnly`,
+`pointNotation`, `precannedArea`, and others) were confirmed directly from
+the endpoint's Swagger "Parameters" panel. The endpoint also accepts a bare
+GeoJSON `Polygon` request body (`{"type": "Polygon", "coordinates": [...],
+"bbox": [...]}`, not wrapped in another object) as an alternative to the
+radius filter — confirmed from the "Try it out" request-body editor — but
+`fetch_data.py` uses the simpler radius parameters by default. Per the
+endpoint's own description, **CSV/JSONLINES responses are capped at 2500
+rows per request; JSON-LD responses at 250** — `fetch_data.py` pages with
+`skip`/`limit` accordingly and chunks one calendar year at a time.
 
-> **Note on the docs site:** the human-readable documentation pages under
-> `environment.data.gov.uk/.../doc/` and `/view/` block automated crawling via
-> `robots.txt`. The `/id/` and `/data/` endpoints used by this project are the
-> actual public data API (JSON/CSV/RDF), which is what it's there for.
+**What wasn't confirmed:** the exact JSON-LD field names for an individual
+*observation* record (as opposed to a sampling point or sampling record,
+both of which were confirmed from live examples). `fetch_data.py` therefore
+requests CSV first, since the API's own docs explicitly call out CSV as a
+supported bulk format for this endpoint; if the server doesn't actually
+serve CSV, it falls back to a tolerant, keyword-based field finder over the
+JSON-LD response (`_flatten_observation_member` / `_OBS_FIELD_CANDIDATES` in
+`fetch_data.py`). Either way, the first raw page fetched is written to
+`data/_debug_first_observation.csv` or `.json` — if `fetch_data.py` reports
+zero rows parsed, look at that file first; it'll show you the real shape,
+and the field-candidate list is a single, clearly-commented block to edit.
+**Run `python fetch_data.py --probe` before a full pull** to catch this in
+seconds rather than after a multi-minute run.
 
 ## Defining "worst"
 
