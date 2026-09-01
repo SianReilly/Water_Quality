@@ -188,6 +188,12 @@ with st.sidebar:
 
     sp_types = sorted(df["sampling_point_type"].dropna().unique().tolist())
     selected_types = st.multiselect("Sampling point type", options=sp_types, default=sp_types)
+    unmatched_pct = df["sampling_point_type"].isna().mean()
+    if unmatched_pct > 0:
+        st.caption(
+            f"Type unknown for {unmatched_pct:.0%} of readings (not matched to the sampling-points "
+            "list) — these are always included regardless of this filter."
+        )
 
     top_n = st.slider("Number of 'worst' sites to highlight", min_value=3, max_value=20, value=8)
 
@@ -206,7 +212,10 @@ mask = (
     & (df["year"] <= year_range[1])
 )
 if selected_types:
-    mask &= df["sampling_point_type"].isin(selected_types)
+    # Rows with an unmatched/unknown type are always kept -- excluding them would
+    # silently drop real data whenever the sampling-points/observations merge is
+    # incomplete, which is common since the two are fetched via separate API calls.
+    mask &= df["sampling_point_type"].isin(selected_types) | df["sampling_point_type"].isna()
 
 fdf = df[mask].copy()
 
