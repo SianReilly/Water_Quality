@@ -15,26 +15,26 @@ cd london-water-quality
 pip install -r requirements.txt
 
 # 1. Build the local data cache (recommended: run this once from the CLI)
-python fetch_data.py --years 5 --max-points 400
+python fetch_data.py --years 5 --radius-km 30
 
 # 2. Launch the app
 streamlit run app.py
 ```
 
 If you skip step 1, the app will offer a "Quick-start" button that fetches a
-small live sample (60 sites, 2 years) directly from the API so you can try it
-immediately — but for a proper "worst water quality over time" analysis, run
-the full `fetch_data.py` pull first (see options below).
+small live sample (15km radius, 2 years) directly from the API so you can try
+it immediately — but for a proper "worst water quality over time" analysis,
+run the full `fetch_data.py` pull first (see options below).
 
 ## `fetch_data.py` options
 
 ```bash
-python fetch_data.py --years 8 --max-points 0   # 8 years, no cap on sampling points (largest pull)
-python fetch_data.py --years 3 --max-points 150  # smaller, faster pull
+python fetch_data.py --years 8 --radius-km 40   # more history, wider area (largest pull)
+python fetch_data.py --years 2 --radius-km 15   # smaller, faster pull
 ```
 
-- `--years` — how many years of history to fetch (measurement requests are chunked one calendar year at a time to stay within the API's row limits).
-- `--max-points` — caps how many London sampling points are queried, so a demo run stays fast. Use `0` for no cap (this can be slow — Greater London typically has several hundred to a few thousand sampling points across rivers, groundwater, coastal/tidal and discharge monitoring).
+- `--years` — how many years of history to fetch (measurement requests are chunked one calendar year at a time, and paged with `_offset`, to stay within the API's ~2 minute per-request timeout).
+- `--radius-km` — the EA API only supports radius (`lat`/`long`/`dist`) or EA-area-code filtering for this dataset, **not** a bounding box — an earlier version of this script assumed bounding-box params (`min-easting`/`max-easting`) and got 404s, since that filter doesn't exist on this endpoint. The default of 30km from central London (Trafalgar Square) is chosen because the API docs describe `dist` as filtering "within approximately a square" of that half-width, which comfortably covers the Greater London boundary corner-to-centre. Widen it if you want to include the wider Thames catchment.
 
 Data is written to `data/london_sampling_points.parquet` and
 `data/london_measurements.parquet`, which `app.py` reads on startup
@@ -44,41 +44,50 @@ them, since the archive updates regularly).
 ## How the API is used
 
 The Water Quality Archive is a Linked-Data-API-style service that returns
-JSON for reference entities (sampling points) and CSV for bulk data
-(measurements). Two endpoints matter here:
+JSON/CSV/RDF, documented at
+https://environment.data.gov.uk/water-quality/view/doc/reference. Two
+endpoints matter here (parameter names taken directly from that reference):
 
-**Sampling points**, filtered to a Greater London bounding box in British
-National Grid (EPSG:27700) metres:
+**Sampling points**, filtered by radius around central London:
 
 ```
 https://environment.data.gov.uk/water-quality/id/sampling-point.json
-    ?min-easting=502000&max-easting=563000
-    &min-northing=155000&max-northing=202000
-    &_limit=2000&_offset=0
+    ?lat=51.5074&long=-0.1278&dist=30
+    &_view=full&_limit=2000&_offset=0
 ```
 
-**Measurements**, filtered by sampling point and date range:
+**Measurements**, filtered by the same radius and a date range, one calendar
+year at a time:
 
 ```
 https://environment.data.gov.uk/water-quality/data/measurement.csv
-    ?samplingPoint=TH-1234&samplingPoint=TH-5678&...
-    &startDate=2023-01-01&endDate=2023-12-31&_limit=50000
+    ?lat=51.5074&long=-0.1278&dist=30
+    &startDate=2023-01-01&endDate=2023-12-31
+    &_view=full&_limit=5000&_offset=0
 ```
 
-`fetch_data.py` batches sampling points (25 per request) and pages one
-calendar year at a time, so no single request tries to pull an unbounded
-amount of data. Column names in the EA's CSV export can shift slightly
-between exports, so `_clean_measurements()` matches on keywords
-(`"samplingpoint" + "notation"`, `"determinand" + "label"`, etc.) instead of a
-hardcoded header list, and normalises everything to a stable internal schema.
+Important things this API does **not** support, that are easy to assume by
+analogy with other EA/Defra APIs (e.g. the bathing-water API used elsewhere
+in this project's development): there is **no bounding-box filter**
+(`min-easting`/`max-easting`) on the sampling-point or measurement endpoints
+— only `lat`/`long`/`dist`, `easting`/`northing`/`dist`, or `area`/`subArea`
+EA-organisational-unit codes. Using bounding-box params returns a 404.
+
+`fetch_data.py` pages one calendar year at a time via `_offset`/`_limit`, so
+no single request risks the API's ~2 minute server-side timeout (for a much
+bigger pull than this covers, the API also has an async `/batch/measurement`
+endpoint — see the docs). `_view=full` is used so each measurement row
+already carries its sampling point's `lat`/`long` directly, avoiding a
+separate British-National-Grid reprojection step. Column names in the CSV
+export are matched against the documented `_view=full` property paths
+first (e.g. `sample.samplingPoint.label`, `determinand.label`), with a
+keyword-based fallback in `_clean_measurements()` in case a live export
+differs slightly.
 
 > **Note on the docs site:** the human-readable documentation pages under
 > `environment.data.gov.uk/.../doc/` and `/view/` block automated crawling via
 > `robots.txt`. The `/id/` and `/data/` endpoints used by this project are the
-> actual public data API (JSON/CSV/RDF), which is what it's there for. See
-> the Environment Agency's own published examples for the same endpoint
-> patterns, e.g. the [Water Quality training exercise
-> notes](https://catchmentbasedapproach.org/wp-content/uploads/2018/08/Water-Quality-OpenWIMS-Exercise-Answers.pdf).
+> actual public data API (JSON/CSV/RDF), which is what it's there for.
 
 ## Defining "worst"
 
