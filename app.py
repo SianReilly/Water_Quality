@@ -158,6 +158,31 @@ df["site_label"] = df["sampling_point_label"].fillna(df["sampling_point_notation
 df = df.dropna(subset=["lat", "long", "result_numeric", "year"])
 df["year"] = df["year"].astype(int)
 
+if df.empty:
+    st.title("London Water Quality Explorer")
+    st.error(
+        f"Loaded {len(measurements):,} cached observation rows, but every single one is missing "
+        "`lat`, `long`, `result_numeric`, or `year` after parsing -- so nothing is left to show. "
+        "This means `fetch_data.py`'s column-name guessing (`_finalise_measurements` / "
+        "`_OBS_FIELD_CANDIDATES`) didn't match the real columns the API actually returned. "
+        "The diagnostics below show exactly what came back -- please share a screenshot of this "
+        "section so the field mapping can be corrected precisely instead of guessed again."
+    )
+    with st.expander("\U0001F50D Diagnostics: raw measurements data", expanded=True):
+        st.write("**Raw column names returned by fetch_data.py:**")
+        st.code(", ".join(measurements.columns.tolist()))
+
+        st.write("**Non-null count per column (out of "
+                  f"{len(measurements):,} rows):**")
+        st.dataframe(measurements.notna().sum().rename("non_null_count").to_frame())
+
+        st.write("**First 5 raw rows:**")
+        st.dataframe(measurements.head())
+
+        st.write("**Sampling points cache columns:**")
+        st.code(", ".join(sampling_points.columns.tolist()) if not sampling_points.empty else "(empty)")
+    st.stop()
+
 # --------------------------------------------------------------------------- #
 # 2. SIDEBAR FILTERS
 # --------------------------------------------------------------------------- #
