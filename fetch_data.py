@@ -17,6 +17,15 @@ robots.txt, so this was checked by hand rather than scraped).
 Confirmed endpoints and behaviour
 ----------------------------------
 Base URL: https://environment.data.gov.uk/water-quality
+    (Confirmed directly via Swagger UI's "Try it out" -> Execute -> Curl command
+    against GET /sampling-point, which returned a real 200 with 33 sampling
+    points for a 5km radius around central London. The critical header is an
+    explicit `Accept: application/ld+json` -- omitting it appears to route the
+    request to the docs/explorer Next.js frontend instead of the API backend,
+    which returns *that app's own* 404 HTML page rather than a JSON API error.
+    `Accept-Crs` is optional and defaults to British National Grid (EPSG:27700)
+    if omitted; we set it explicitly to WGS84 (EPSG:4326) so geometry comes
+    back as lon/lat directly.)
 
 GET  /sampling-point
     List sampling points. Confirmed response shape is a JSON-LD "hydra:Collection"
@@ -106,6 +115,7 @@ CRS_WGS84 = "http://www.opengis.net/def/crs/EPSG/0/4326"
 
 COMMON_HEADERS = {
     "User-Agent": "london-water-quality-dashboard/1.0 (streamlit demo; contact via github issue)",
+    "Accept": "application/ld+json",
     "Accept-Crs": CRS_WGS84,
     "API-Version": "1",
 }
@@ -130,8 +140,19 @@ class FetchConfig:
 def _raise_for_status_verbose(resp: requests.Response):
     """Like resp.raise_for_status(), but prints the API's own error detail
     (this API returns a structured `{"detail": [...]}` body on 422) so a bad
-    parameter is diagnosable from one failed run instead of a blind traceback."""
+    parameter is diagnosable from one failed run instead of a blind traceback.
+    Also flags the specific case of getting the Next.js docs frontend's own
+    HTML 404 page back (a sign the URL path itself is wrong, not a bad param)."""
     if resp.status_code >= 400:
+        content_type = resp.headers.get("Content-Type", "")
+        if "text/html" in content_type:
+            raise RuntimeError(
+                f"{resp.status_code} from {resp.url}\n"
+                "Got an HTML page back, not a JSON API response -- this usually means "
+                "the URL path is wrong (e.g. hitting the docs/explorer frontend instead "
+                "of the API backend) rather than a bad parameter. Confirm the real base "
+                "URL via Swagger UI's 'Try it out' -> Execute -> Curl command."
+            )
         detail = resp.text[:2000]
         try:
             detail = json.dumps(resp.json(), indent=2)[:2000]
