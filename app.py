@@ -106,13 +106,11 @@ def load_cached_data():
 
 
 @st.cache_data(show_spinner=False)
-def quick_start_fetch(max_points: int, years: int):
-    sp = fd.fetch_london_sampling_points()
-    if len(sp) > max_points:
-        sp = sp.head(max_points)
+def quick_start_fetch(radius_km: float, years: int):
+    sp = fd.fetch_london_sampling_points(radius_km=radius_km)
     end = date.today()
     start = date(end.year - years, end.month, end.day)
-    ms = fd.fetch_measurements(sp["notation"].tolist(), start, end)
+    ms = fd.fetch_measurements(start, end, radius_km=radius_km)
     fd.save_cache(sp, ms)
     return sp, ms
 
@@ -124,15 +122,15 @@ if sampling_points.empty or measurements.empty:
     st.warning(
         "No local data cache found yet. Build the full cache from the command line for "
         "best results:\n\n"
-        "```\npython fetch_data.py --years 5 --max-points 400\n```\n\n"
-        "Or use the quick-start button below to pull a small sample (60 sampling points, "
+        "```\npython fetch_data.py --years 5 --radius-km 30\n```\n\n"
+        "Or use the quick-start button below to pull a small sample (15km radius, "
         "2 years) directly from the Environment Agency API so you can try the app now. "
         "This calls the live API and may take a minute or two."
     )
     if st.button("\U0001F680 Quick-start: fetch a small sample now"):
         with st.spinner("Fetching sampling points and measurements from the EA API..."):
             try:
-                sampling_points, measurements = quick_start_fetch(max_points=60, years=2)
+                sampling_points, measurements = quick_start_fetch(radius_km=15, years=2)
             except Exception as exc:  # noqa: BLE001
                 st.error(f"Fetch failed: {exc}")
                 st.stop()
@@ -140,15 +138,23 @@ if sampling_points.empty or measurements.empty:
         st.rerun()
     st.stop()
 
-# Join measurements to sampling point locations
-df = measurements.merge(
-    sampling_points[["notation", "label", "lat", "long", "sampling_point_type"]],
-    left_on="sampling_point_notation",
-    right_on="notation",
-    how="left",
-    suffixes=("", "_sp"),
-)
-df["site_label"] = df["label"].fillna(df["sampling_point_notation"])
+# Measurements already carry the sampling point's lat/long/label directly
+# (fetched with _view=full), so no merge against the sampling-points table is
+# needed for plotting. We still optionally bring in sampling_point_type from
+# the sampling-points table, since that's a "list sampling points" property
+# rather than a "list measurements" one.
+df = measurements.copy()
+if "sampling_point_type" not in df.columns and not sampling_points.empty:
+    df = df.merge(
+        sampling_points[["notation", "sampling_point_type"]],
+        left_on="sampling_point_notation",
+        right_on="notation",
+        how="left",
+    )
+if "sampling_point_type" not in df.columns:
+    df["sampling_point_type"] = pd.NA
+
+df["site_label"] = df["sampling_point_label"].fillna(df["sampling_point_notation"])
 df = df.dropna(subset=["lat", "long", "result_numeric", "year"])
 df["year"] = df["year"].astype(int)
 
